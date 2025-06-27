@@ -8,7 +8,11 @@ from rasterio import features
 from shapely.geometry import box
 
 class RasterData:
-    def __init__(self, raster_reader, window):
+    def __init__(
+            self, 
+            raster_reader: rasterio.io.DatasetReader,
+            window: rasterio.windows.Window
+    ):
         self.bounds = box(*raster_reader.window_bounds(window))
         self.transform = raster_reader.window_transform(window)
         self.shape = (256, 256)
@@ -17,7 +21,7 @@ class RasterData:
         self.dates = dates
         return self
 
-def get_band_paths(product_path):
+def get_band_paths(product_path: Path):
     '''
     Obtiene una lista con los paths de las bandas a partir del path de producto.
     '''
@@ -26,13 +30,13 @@ def get_band_paths(product_path):
         ))
 
 # Para acceder archivos de productos
-def path2band(path):
+def path2band(path: Path):
     '''
     Obtiene el código de banda de un producto Sentinel-2 a partir de su path.
     '''
     return str(path).split("/")[-1].split("_")[-2]
 
-def path2date(path):
+def path2date(path: Path):
     '''
     Entrega el datetime asociado a un producto Sentinel-2 a partir de su path.
     '''
@@ -40,7 +44,7 @@ def path2date(path):
 
 
 # Para trabajar patches
-def patch_coors(n, patch_size=256, array_size=1830):
+def patch_coors(n: int, patch_size=256, array_size=1830):
     '''
     Retorna las coordenadas del punto superior izquierdo del patch n-ésimo.
     Supone que todos los productos son de igual tamaño.
@@ -57,7 +61,7 @@ def patch_coors(n, patch_size=256, array_size=1830):
 
 
 
-def get_labels_in_tile(labels_path, tile_name, class_mapping, crs):
+def get_labels_in_tile(labels_path: Path, tile_name: str, class_mapping: dict, crs) -> gpd.GeoDataFrame:
     '''
     Retorna un geopandas dataframe con las parcelas en el tile
     a partir de un path, el nombre del tile, el mapeo hcat4-clases y un crs.
@@ -74,7 +78,10 @@ def get_labels_in_tile(labels_path, tile_name, class_mapping, crs):
 
 
 
-def get_patch_rasterio(raster_reader, n, patch_size=256, get_data=False):
+def get_patch_rasterio(
+        raster_reader:rasterio.io.DatasetReader,
+        n: int, patch_size=256, get_data=False
+)-> np.ndarray | RasterData :
     '''
     Retorna el patch n-ésimo a partir de un Dataset Reader de rasterio
     '''
@@ -90,10 +97,10 @@ def get_patch_rasterio(raster_reader, n, patch_size=256, get_data=False):
     else:
         return raster_reader.read( 1, window=window)
 
-def create_patch_tensor_rasterio(products_paths, patch_n):
+def create_patch_tensor_rasterio(products_paths: Path, patch_n: int) -> np.ndarray | RasterData :
     '''
-    Retorna tupla (tensor, patch_bounds, lista_de_fechas) con tensor completo.
-    Recibe de una iterable con los paths de todos los productos del tile y el número de patch deseado.
+    Retorna tupla (tensor, RasterData) con tensor del parche completo.
+    Recibe un iterable con los paths de todos los productos del tile y el número de patch deseado.
     '''
     frames = []
     #Se ordenan los path de productos por fecha
@@ -121,7 +128,7 @@ def create_patch_tensor_rasterio(products_paths, patch_n):
     patch_data.set_dates(dates)
     return tensor_final, patch_data  # (temporal, bands, N, N)
 
-def get_annotation_raster(patch_data: RasterData, labels_gdf):
+def get_annotation_raster(patch_data: RasterData, labels_gdf: gpd.GeoDataFrame) -> np.ndarray:
         tensor_bounds = patch_data.bounds
         sel_parcels = labels_gdf[ labels_gdf.intersects(tensor_bounds) ]
         shapes = list(zip(sel_parcels.polygon, sel_parcels.crop_class))
@@ -135,7 +142,7 @@ def get_annotation_raster(patch_data: RasterData, labels_gdf):
         )
 
 
-def get_id(tile_name, patch_n):
+def get_id(tile_name: str, patch_n: int):
     array_size = 10980
     tiles = [
         "31TBF",
