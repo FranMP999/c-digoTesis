@@ -1,2 +1,1 @@
-Código Tésis
-# c-digoTesis
+# Código Tésis
