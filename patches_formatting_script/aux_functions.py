@@ -8,6 +8,11 @@ from rasterio import features
 from shapely.geometry import box
 
 class RasterData:
+    '''
+    Clase para pasar la data geográfica (y metadata) del patch de una función a otra.
+    Esta en conjunto con el np.ndarray del patch constituyen toda la información
+    extraída en su creación.
+    '''
     def __init__(
             self, 
             raster_reader: rasterio.io.DatasetReader,
@@ -164,6 +169,32 @@ def get_id(tile_name: str, patch_n: int):
     assert patch_n < patchesxtile, "número de patch no válido"
     assert tile_name in tiles, "tile no válido"
     return id
+
+
+def which_patch(id:str):
+    '''
+    Recibe un id y entrega a qué tile y patch corresponde.
+    No se utiliza en el código pero puede ser útil.
+    '''
+    array_size = 10980
+    tiles = [
+        "31TBF",
+        "29TNF",
+        "30UXU",
+        "32TPP",
+        "32UMC",
+        "29UNU",
+        "33TVN",
+        "31UFU",
+        "35TMH",
+        "32VNH",
+    ]
+    patchesxtile = (array_size//256 + 1)**2
+
+    tile_name = tiles[id//patchesxtile]
+    patch_n = id%patchesxtile
+    print(f"El id {id} está asocidado al patch {patch_n} del tile {tile_name}.")
+    return tile_name, patch_n
 
 ### LEGACY CODE ###
 

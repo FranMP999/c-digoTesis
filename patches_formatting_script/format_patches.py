@@ -99,7 +99,7 @@ for tile_name in unique_tiles:
             "geometry": raster_data.bounds,
         })
         count = (count + 1)%5
-        if True :
+        if count==0 :
             #Almacenar metadata
             metadata_gdf = (
                 gpd.GeoDataFrame(metadata_rows, geometry="geometry", crs=sentinel_crs)
