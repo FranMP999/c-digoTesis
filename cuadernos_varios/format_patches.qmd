@@ -1,0 +1,595 @@
+---
+title: Prueba tensores patches con Tile T31TBF, para fechas 2021/10/02, 2021/10/07
+jupyter: python3                                            
+format:
+  html:
+    code-fold: true
+---
+
+Objetivos:
+Quiero patches de 256x256, que son tensores de 4 dimensiones, 2 de imagen, 1 de banda/etiqueta y una de tiempo.
+La idea es para cada patch crear las etiquetas cruzando los polígonos en el archivo gpkg enviado por Martin y quedarnos con 
+los patches que tengan densidad de etiquetas suficientes.
+
+Los patches los tengo que crear antes de leer.
+
+
+```{python}
+from pathlib import Path
+import numpy as np
+import pandas as pd 
+import matplotlib.pyplot as plt
+
+import rasterio
+import xarray as xr
+
+import geopandas as gpd
+import contextily as cx
+
+
+from shapely.geometry import box
+import rasterio
+from rasterio.features import rasterize
+from rasterio.transform import from_bounds
+from rasterio import features
+
+
+```
+
+## Funciones Auxiliares
+```{python}
+# Para acceder archivos de productos
+def path2band(path):
+    '''
+    Obtiene el código de banda de un producto Sentinel-2 a partir de su path.
+    '''
+    return str(path).split("/")[-1].split("_")[-2]
+
+def path2date(path):
+    '''
+    Entrega el datetime asociado a un producto Sentinel-2 a partir de su path.
+    '''
+    return pd.to_datetime(str(path).split("/")[-1].split("_")[1][:8])
+
+def get_band_paths(product_path):
+    return list(product_path.glob(
+        f"*_*_B*"
+        ))
+
+# Para trabajar patches
+def patch_coors(n, patch_size=256, array_size=1830):
+    '''
+    Retorna las coordenadas del punto superior izquierdo del patch n-ésimo
+    '''
+    lim = patch_size *(array_size // patch_size +1 )
+    x = (n * patch_size) % lim
+    if ((n+1) * patch_size) % lim == 0:
+        x = array_size - patch_size
+
+    y= ((n * patch_size) // lim) * patch_size
+    if ((n * patch_size) // lim) * patch_size + patch_size > array_size:
+        y = array_size - patch_size
+    return (x,y)
+#lim = array_size + (array_size % patch_size) #por si 256 no cabe exacto
+
+
+
+def get_patch(xarray, n, patch_size=256):
+    '''
+    Retorna el patch n-ésimo
+    '''
+    array_size = xarray.x.size
+
+    x_patch, y_patch = patch_coors(n, patch_size, array_size)
+    return xarray.isel(
+            x=slice(x_patch, x_patch + 256),
+            y=slice(y_patch, y_patch + 256),
+        )
+
+
+def patch_iterator(xarray, patch_size=256):
+    final_idx = (xarray.x.size//256+1)**2
+    for idx_patch in range(final_idx):
+        yield get_patch2(xarray, idx_patch, patch_size=256)
+
+
+```
+
+
+## Importación de productos S2
+
+```{python}
+sentinel_crs = 'EPSG:32631'
+s2_path = Path("../data/productos")
+product1_path = s2_path / "S2A_MSIL2A_20211001T112121_N0500_R037_T29TNF_20230108T191004"
+product2_path = s2_path / "S2A_MSIL2A_20211004T113321_N0500_R080_T29TNF_20230111T081711"
+
+```
+```{python}
+
+patch_n = 23
+products = []
+for product_path in [product1_path, product2_path]:
+    products.append(
+        xr.concat([
+        get_patch(
+            xr.open_dataset(band_path, engine="rasterio", band_as_variable=True)
+                #.drop_dims("band")
+                .assign(band=path2band(band_path)).set_coords("band")
+                .assign(time=path2date(band_path)).set_coords("time"),
+            n = patch_n
+            )
+        for band_path in get_band_paths(product_path)
+        ], dim="band")
+    )
+time_series_tensor = xr.concat(products, dim="time")
+
+sentinel_crs = 'EPSG:32631'
+```
+
+### Pruebas de uso
+```{python}
+print(time_series_tensor.dims)
+print(time_series_tensor.coords)
+#print(time_series_tensor.data)
+print(time_series_tensor.attrs)
+rgb_bands = ['B03', 'B02', 'B01']
+time_series_tensor.band_1.sel(band=rgb_bands).plot.imshow(col='time', robust=True)
+plt.show()
+```
+
+
+## Creación Metadata
+
+
+```{python}
+metadata_rows = []
+metadata_rows.append( {
+    "id": 0,
+    "tile_name": "T31TBF",
+    "patch_n": 23,
+    "geometry": box(*time_series_tensor.rio.bounds()),
+    "dates_S2": {
+        i: pd.to_datetime(date).strftime("%Y%m%d") 
+        for i, date in enumerate(time_series_tensor.time.to_numpy())
+    }
+})
+metadata_rows.append( {
+    "id": 1,
+    "tile_name": "T31TBF",
+    "patch_n": 40,
+    "geometry": box(*time_series_tensor2.rio.bounds()),
+    "dates_S2": {
+        i: pd.to_datetime(date).strftime("%Y%m%d") 
+        for i, date in enumerate(time_series_tensor2.time.to_numpy())
+    }
+
+})
+metadata_rows
+```
+
+```{python}
+metadata_old = (
+    gpd.read_file("../patches_code/data/metadata.geojson")
+    .astype({
+        "id": int,
+        "patch_n": int,
+    })
+    .set_index("id")
+        )
+metadata_old.to_json()
+metadata_labels = gpd.GeoDataFrame(metadata_rows, geometry="geometry", crs=sentinel_crs).set_index("id")
+pd.concat([
+    metadata_old,
+    metadata_labels,
+           ]).drop_duplicates(subset=["tile_name", "patch_n"])
+
+
+# with open("metadata_labels.geojson", "w") as text_file:
+#     text_file.write(metadata_labels.to_json())
+```
+
+
+## Creación de las etiquetas
+
+### Importación de polígonos de prueba
+```{python}
+file_path = Path("../data") / "gsa_2022_selectedtiles.gpkg"
+
+# 100_polígonos del tile de estudio
+centroids_gdf = gpd.read_file(
+    file_path,
+    where="name='31TBF'",
+     rows=slice(0,100)
+)#.to_crs(sentinel_crs)
+#base_crs = centroids_gdf.crs
+
+
+#(por alguna razón geometry es una lista de geometrias con un sólo poligono adentro)
+centroids_gdf["polygon"] = centroids_gdf.geometry.map(lambda x: x.geoms[0])
+
+#ax = centroids_gdf.plot()
+#cx.add_basemap(ax, crs=base_crs)
+#plt.show()
+
+```
+
+## Importación banda de prueba
+Voy a experimentar con una sóla banda para reducir carga en la ram y poder 
+hacer gráficos.
+
+```{python}
+#raster de ejemplo
+s2_path = Path("../data/S2")
+product2_path = s2_path / "S2B_MSIL2A_20211007T104829_N0500_R051_T31TBF_20230112T071413.SAFE/"
+example_band_path = get_band_paths(product2_path)[2]
+example_band_path
+example_raster = xr.open_dataset(
+    example_band_path, engine="rasterio", band_as_variable=True
+)
+
+example_raster.rio.crs.to_wkt("crs.wkt")
+(example_raster.x.size//256 + 1)**2
+
+```
+
+## Gráfico
+```{python}
+#mapa de europa para gráficos
+world_url = "https://naciscdn.org/naturalearth/110m/cultural/ne_110m_admin_0_countries.zip"
+europe = ( #sin disolver países
+           gpd.read_file(world_url)
+           .query("CONTINENT == 'Europe'")
+           .query("NAME != 'Russia'")
+           .query("NAME != 'France'")
+           .reset_index()
+           .to_crs(sentinel_crs)
+           )
+
+```
+
+
+```{python}
+fig, (ax1, ax2) = plt.subplots(2)
+
+raster_polygon = box(*example_raster.rio.bounds())
+parcels_bounds = box(*centroids_gdf.bounds.agg({
+    "minx": "min",
+    "miny": "min",
+    "maxx": "max",
+    "maxy": "max",
+}))
+
+# Sin Europa
+ax1.plot(*raster_polygon.exterior.xy, label="raster")
+
+for i, parcel in centroids_gdf.iterrows():
+    ax1.fill(*parcel.polygon.exterior.xy, alpha=0.5, fc='r', ec='none')
+ax1.plot(*parcels_bounds.exterior.xy, label="parcels_bounds")
+ax1.set_title("Parcelas en Tile")
+ax1.legend()
+
+#Con Europa
+europe.plot("NAME", figsize=(10, 10), alpha=0.5, edgecolor="k", ax=ax2)
+ax1.plot(*raster_polygon.exterior.xy, label="raster")
+ax2.set_title("Tile en Europa")
+ax2.legend()
+
+
+fig.suptitle("Gráfico de parcelas")
+plt.show()
+```
+
+
+```{python}
+patch = get_patch(
+    example_raster,
+    n = 17
+    )
+
+raster_polygon = box(*example_raster.rio.bounds())
+patch_polygon = box(*patch.rio.bounds())
+
+
+print(centroids_gdf.intersects(raster_polygon).all())
+print(centroids_gdf.intersects(patch_polygon).any())
+print(raster_polygon.contains(patch_polygon))
+
+'''
+contains
+contains_properly
+covered_by
+covers
+'''
+parcels_bounds = box(*centroids_gdf.bounds.agg({
+        "minx": "min",
+        "miny": "min",
+        "maxx": "max",
+        "maxy": "max",
+    }))
+```
+
+
+```{python}
+sel_parcels = centroids_gdf[centroids_gdf.intersects(patch_polygon)]
+shapes = list(zip(sel_parcels.polygon, sel_parcels.hcat4_code))
+rasterized = features.rasterize(
+    shapes,
+    out_shape = patch.rio.shape,
+    fill = 0,
+    transform = patch.rio.transform(),
+    all_touched = False,
+    dtype = None
+)
+
+
+#Gráfico
+fig, (ax1, ax2) = plt.subplots(2)
+
+for parcel in sel_parcels.polygon:
+    ax1.plot(*parcel.exterior.xy)
+ax1.plot(*patch_polygon.exterior.xy)
+ax2.set_title("patch con parcelas")
+
+ax2.imshow(rasterized)
+ax2.set_title("Raster")
+
+fig.suptitle("Gráfico de raster")
+plt.show()
+help(plt.imshow)
+
+```
+
+## Prueba con tensor
+
+```{python}
+tensor_polygon = box(*time_series_tensor.rio.bounds())
+sel_parcels = centroids_gdf[centroids_gdf.intersects(tensor_polygon)]
+shapes = list(zip(sel_parcels.polygon, sel_parcels.hcat4_code))
+rasterized = features.rasterize(
+    shapes,
+    out_shape = time_series_tensor.rio.shape,
+    fill = 0,
+    transform = time_series_tensor.rio.transform(),
+    all_touched = False,
+    dtype = None
+)
+rasterized
+shapes
+
+
+fig, (ax1, ax2) = plt.subplots(2)
+
+for parcel in sel_parcels.polygon:
+    ax1.plot(*parcel.exterior.xy)
+ax1.plot(*tensor_polygon.exterior.xy)
+ax1.set_title("patch con parcelas")
+
+ax2.imshow(rasterized)
+ax2.set_title("Raster")
+
+fig.suptitle("Gráfico de raster")
+plt.show()
+
+
+```
+
+```{python}
+time_series_tensor["hcat4_code"] = (["x","y"], rasterized)
+labeled_tensor = xr.concat([
+    time_series_tensor.band_1,
+    time_series_tensor.hcat4_code.assign_coords(band="hcat4_code")
+], dim="band")
+
+labeled_tensor
+labeled_tensor.transpose("x", "y", "band", "time").to_numpy()
+number = (11000//256+1)**2
+"{:04}".format(number)
+print(s2_path)
+```
+
+## Prueba de archivo S2
+```{python}
+def get_annotation_raster( patch_tensor, labels_gdf):
+        tensor_bounds = box(*patch_tensor.rio.bounds())
+        sel_parcels = labels_gdf[ labels_gdf.intersects(tensor_bounds) ]
+        shapes = list(zip(sel_parcels.polygon, sel_parcels.crop_class))
+        return features.rasterize(
+            shapes,
+            out_shape = patch_tensor.rio.shape,
+            fill = 0,
+            transform = patch_tensor.rio.transform(),
+            all_touched = False, # Esto lo tengo que revisar bien
+            dtype = None
+        )
+def get_labels_in_tile(labels_path, tile_name, class_mapping, crs):
+    return (
+        gpd.read_file(
+            labels_path,
+            where=f"name='{tile_name}'",
+        )
+        .to_crs(crs)
+        .assign(polygon=lambda df: df.geometry.map(lambda x: x.geoms[0]))
+        .assign(crop_class=lambda df: df.hcat4_code.map(class_mapping))
+    )
+def create_patch_tensor(products_paths, patch_n):
+        multiband_tensors = []
+        for product_path in products_paths:
+            multiband_tensors.append(
+                xr.concat([
+                    get_patch(
+                        xr.open_dataset(band_path, engine="rasterio", band_as_variable=True)
+                        #.drop_dims("band")
+                        .assign(band=path2band(band_path)).set_coords("band")
+                        .assign(time=path2date(band_path)).set_coords("time"),
+                        n = patch_n
+                    )
+                    for band_path in get_band_paths(product_path)
+                ], dim="band")
+            )
+        return xr.concat(multiband_tensors, dim="time")
+
+```
+```{python}
+example_product_path = list(s2_path.glob(f"*{tile_name}*"))[0]
+example_band_path = get_band_paths(example_product_path)[1]
+
+example_raster = xr.open_dataset(
+    example_band_path, engine="rasterio", band_as_variable=True
+)
+for example_product_path in s2_path.glob(f"*{tile_name}*"):
+    for example_band_path in get_band_paths(example_product_path):
+        print(xr.open_dataset(
+            example_band_path, engine="rasterio", band_as_variable=True
+        ).rio.crs.to_epsg())
+other_crs = xr.open_dataset(
+            example_band_path, engine="rasterio", band_as_variable=True
+        ).rio.crs
+
+```
+
+```{python}
+sentinel_crs = 'EPSG:32629'
+in_path = Path("../data") 
+s2_path = in_path / "productos"
+labels_path = in_path / "gsa_2022_selectedtiles.gpkg"
+
+class_mapping_path = Path("../patches_code/class_mapping.csv")
+class_mapping = (
+    pd.read_csv(class_mapping_path, index_col=0)
+    .iloc[:,0]
+    .to_dict()
+)
+
+unique_tiles = set([
+    str(path).split("_")[-2][1:]
+    for path in s2_path.glob( f"*")
+    ])
+tile_name = list(unique_tiles)[0]
+patch_n = 30
+labels_gdf = get_labels_in_tile(
+    labels_path=labels_path,
+    tile_name=tile_name,
+    class_mapping=class_mapping,
+    crs=sentinel_crs,
+)
+time_series_tensor = create_patch_tensor(
+    products_paths=s2_path.glob(f"*{tile_name}*"),
+    patch_n=patch_n
+)
+# Crear la banda de etiquetado
+annotation_raster = get_annotation_raster(
+        time_series_tensor, 
+        labels_gdf
+)
+annotation_raster
+
+```
+```{python}
+tensor_bounds = box(*time_series_tensor.rio.bounds())
+sel_parcels
+sel_parcels = labels_gdf[ labels_gdf.intersects(tensor_bounds) ]
+shapes = list(zip(sel_parcels.polygon, sel_parcels.crop_class))
+return features.rasterize(
+    shapes,
+    out_shape = patch_tensor.rio.shape,
+    fill = 0,
+    transform = patch_tensor.rio.transform(),
+    all_touched = False, # Esto lo tengo que revisar bien
+    dtype = None
+)
+
+```
+
+```{python}
+fig, (ax1, ax2) = plt.subplots(2)
+
+parcels_bounds = box(*labels_gdf.bounds.agg({
+    "minx": "min",
+    "miny": "min",
+    "maxx": "max",
+    "maxy": "max",
+}))
+
+# Sin Europa
+ax1.plot(*tensor_bounds.exterior.xy, label="raster")
+
+# for i, parcel in labels_gdf.iterrows():
+#     ax1.fill(*parcel.polygon.exterior.xy, alpha=0.5, fc='r', ec='none')
+ax1.plot(*parcels_bounds.exterior.xy, label="parcels_bounds")
+ax1.set_title("Parcelas en Tile")
+ax1.legend()
+
+#Con Europa
+europe.plot("NAME", figsize=(10, 10), alpha=0.5, edgecolor="k", ax=ax2)
+ax2.plot(*tensor_bounds.exterior.xy, label="raster")
+#ax2.plot(*parcels_bounds.exterior.xy, label="parcels_bounds")
+ax2.set_title("Tile en Europa")
+ax2.legend()
+
+
+fig.suptitle("Gráfico de parcelas")
+plt.show()
+```
+
+```{python}
+rgb_bands = ['B02', 'B03', 'B04']
+time_series_tensor.band_1.sel(band=rgb_bands).isel(time=1).plot.imshow(robust=True)
+plt.show()
+```
+
+## Importación alternativa productos S2 (rasterio)
+
+```{python}
+def get_patch_rasterio(raster_reader, n, patch_size=256):
+    '''
+    Retorna el patch n-ésimo a parter de un Dataset Reader de rasterio
+    '''
+    array_size = raster_reader.shape[0]
+
+    x_patch, y_patch = patch_coors(n, patch_size, array_size)
+    window = rasterio.windows.Window.from_slices(
+            rows=slice(x_patch, x_patch + 256),
+            cols=slice(y_patch, y_patch + 256),
+        )
+    return raster_reader.read( 1, window=window)
+
+def create_patch_tensor2(products_paths, patch_n):
+        frames = []
+        for product_path in products_paths:
+            band_arrays = []
+            for band_path in get_band_paths(product_path):
+                with rasterio.open(band_path) as src:
+                    data = get_patch_rasterio(src, patch_n)
+                    band_arrays.append(data)
+            if len(band_arrays) == 12:
+                stack = np.stack(band_arrays, axis=0)  # (bands, N, N)
+                frames.append(stack)
+        return np.stack(frames, axis=0)  # (temporal, bands, N, N)
+
+```
+
+```{python}
+sentinel_crs = 'EPSG:32631'
+s2_path = Path("../data/productos")
+product1_path = s2_path / "S2A_MSIL2A_20211001T112121_N0500_R037_T29TNF_20230108T191004"
+product2_path = s2_path / "S2A_MSIL2A_20211004T113321_N0500_R080_T29TNF_20230111T081711"
+
+example_band_path = get_band_paths(product2_path)[1]
+raster_rasterio = rasterio.open(example_band_path)
+
+raster_xarray = xr.open_dataset(example_band_path, engine="rasterio")
+
+patch_rasterio = get_patch_rasterio(raster, 30)
+patch_xarray = get_patch(raster_xarray, 30).band_1.to_numpy()
+
+patch_rasterio
+patch_xarray
+
+```
+stack
+```{python}
+raster_xarray.band_data.isel(x=-1,y=-1)
+plt.imshow(raster_rasterio.read(1))
+plt.show()
+```

@@ -1,0 +1,260 @@
+## Librerías
+
+```{python}
+import os
+import requests
+from dotenv import load_dotenv
+from datetime import date, timedelta, datetime
+
+import pandas as pd
+import geopandas as gpd
+from shapely.geometry import shape
+from shapely import to_wkt
+import contextily as cx
+import matplotlib.pyplot as plt
+
+from tqdm import tqdm
+
+import zipfile
+```
+
+
+## Conexión
+
+```{python}
+load_dotenv("./.env")
+
+copernicus_user = os.getenv("COPERNICUS_USER") # copernicus User
+copernicus_password = os.getenv("COPERNICUS_PASSWORD") # copernicus Password
+
+
+
+def get_keycloak(username: str, password: str) -> str:
+    data = {
+        "client_id": "cdse-public",
+        "username": username,
+        "password": password,
+        "grant_type": "password",
+    }
+    try:
+        r = requests.post(
+            "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token",
+            data=data,
+        )
+        r.raise_for_status()
+    except Exception as e:
+        raise Exception(
+            f"Keycloak token creation failed. Reponse from the server was: {r.json()}"
+        )
+    return r.json()["access_token"]
+
+get_keycloak(copernicus_user,copernicus_password)
+```
+
+
+### WKT de los tiles
+
+```{python}
+target_crs = "EPSG:4326"
+data_dir = "../data/"
+tiles_file = os.path.join(
+    data_dir,
+    f"S2A_OPER_GIP_TILPAR_MPC__20151209T095117_V20150622T000000_21000101T000000_B00.kml"
+)
+tiles_gdf = gpd.read_file(tiles_file).to_crs(target_crs)
+
+# Se extrae el primer polígono de cada tile
+tiles_polygons = (
+    tiles_gdf
+    .assign(
+        geometry=tiles_gdf.geometry.map(lambda x: x.geoms[0])
+        )
+    [["Name", "geometry"]]
+    .set_index("Name")
+)
+
+def tile_to_wkt(tile_name):
+    return (tiles_polygons.loc[tile_name])[0]
+```
+
+
+### Sentinel 1
+
+```{python}
+path = "../data/S1"
+temp_dir = r"./temp"
+tile_name = tile_names[0]
+if not os.path.exists(path):
+    os.makedirs(path)
+if not os.path.exists(temp_dir):
+    os.makedirs(temp_dir)
+
+data_collection = "SENTINEL-1" # Sentinel satellite
+
+start_date_str = "2021-10-01"
+start_date = datetime.strptime(start_date_str,'%Y-%m-%d')
+end_date = start_date + timedelta(days=3)
+end_date_str= end_date.strftime("%Y-%m-%d")
+
+ft = tile_to_wkt(tile_name)
+
+json_ = requests.get(
+    f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products?"
+    f"$filter=Collection/Name eq '{data_collection}' and "
+    f"OData.CSC.Intersects(area=geography'SRID=4326;{ft}') and "
+    f"ContentDate/Start gt {start_date_str}T00:00:00.000Z and "
+    f"ContentDate/Start lt {end_date_str}T00:00:00.000Z"
+    f"&$count=True&$top=1000"
+).json()
+
+p = pd.DataFrame.from_dict(json_["value"]) # Fetch available dataset
+
+if p.shape[0] > 0 : # If we get data back
+    p["geometry"] = p["GeoFootprint"].apply(shape)
+    productDF = gpd.GeoDataFrame(p).set_geometry("geometry")
+    productDF = productDF[productDF["Name"].str.contains("GRD")]
+    productDF = productDF[productDF["Name"].str.contains("IW")]
+    productDF["identifier"] = productDF["Name"].str.split(".").str[0]
+
+    print(f"Total sentinel1 tiles encontrados: {len(productDF)}")
+
+    
+    session = requests.Session()
+    keycloak_token = get_keycloak(copernicus_user, copernicus_password)
+    session.headers.update({"Authorization": f"Bearer {keycloak_token}"})
+
+    for _, feat in tqdm(productDF.iterrows(), desc="Descargando archivos", unit="archivo"):
+        identifier = feat['identifier']
+        name = feat['Name']
+        file_id = feat['Id']
+
+        # Ruta esperada de descompresión and add .SAFE
+        output_folder = os.path.join(path, f"{identifier}.SAFE")
+
+        # Si ya fue descomprimido, saltar
+        if os.path.exists(output_folder):
+            print(f"🔁 Saltando {identifier}, ya existe.")
+            continue
+
+        output_temp = os.path.join(temp_dir, f"{identifier}.zip")
+
+        # Renovar token antes de cada descarga
+        keycloak_token = get_keycloak(copernicus_user, copernicus_password)
+        session.headers.update({"Authorization": f"Bearer {keycloak_token}"})
+
+        # URL de descarga
+        url = f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products({file_id})/$value"
+        response = session.get(url, allow_redirects=False)
+
+        while response.status_code in (301, 302, 303, 307):
+            url = response.headers["Location"]
+            response = session.get(url, allow_redirects=False)
+
+        # Descargar con chunks
+        response = session.get(url, stream=True)
+        total_size = int(response.headers.get('content-length', 0))
+        chunk_size = 1024 * 1024  # 1 MB
+
+        with open(output_temp, "wb") as f:
+            for chunk in response.iter_content(chunk_size=chunk_size):
+                if chunk:
+                    f.write(chunk)
+
+        # Descomprimir
+        with zipfile.ZipFile(output_temp, 'r') as zip_ref:
+            zip_ref.extractall(path)
+        os.remove(output_temp)
+else : # If no tiles found for given date range and AOI
+    print('no data found')
+
+```
+
+
+### Sentinel 2
+
+```{python}
+path = "../data/S2"
+if not os.path.exists(path):
+    os.makedirs(path)
+
+tile_name = tile_names[0]
+
+data_collection = "SENTINEL-2" # Sentinel satellite
+start_date_str = "2021-10-01"
+start_date = datetime.strptime(start_date_str,'%Y-%m-%d')
+end_date = start_date + timedelta(days=10)
+end_date_str= end_date.strftime("%Y-%m-%d")
+ft = tile_to_wkt(tile_name)
+
+json_ = requests.get(
+    f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products?"
+    f"$filter=Collection/Name eq '{data_collection}' and "
+    f"OData.CSC.Intersects(area=geography'SRID=4326;{ft}') and "
+    f"ContentDate/Start gt {start_date_str}T00:00:00.000Z and "
+    f"ContentDate/Start lt {end_date_str}T00:00:00.000Z"
+    f"&$count=True&$top=1000"
+).json()
+
+
+p = pd.DataFrame.from_dict(json_["value"])
+
+if p.shape[0] > 0:
+    p["geometry"] = p["GeoFootprint"].apply(shape)
+    productDF = gpd.GeoDataFrame(p).set_geometry("geometry")
+    productDF = productDF[productDF["Name"].str.contains(tile_name)]
+    print(f"Total tiles encontrados: {len(productDF)}")
+
+    productDF["identifier"] = productDF["Name"].str.split(".").str[0]
+    productDF["Date"] = productDF["ContentDate"].apply(lambda x: x["Start"])
+    productDF["Tile"] = productDF["identifier"].str.split("_").str[5]
+
+        # Número de muestras por tile (puedes cambiarlo o parametrizarlo)
+
+    tile_samples = []
+
+    session = requests.Session()
+    keycloak_token = get_keycloak(copernicus_user, copernicus_password)
+    session.headers.update({"Authorization": f"Bearer {keycloak_token}"})
+
+    for _,feat in tqdm(productDF.iterrows(), desc="Descargando archivos", unit="archivo"):
+        identifier = feat['identifier']
+        name = feat['Name']
+        file_id = feat['Id']
+        output_file = os.path.join(path, f"{identifier}.zip")
+        keycloak_token = get_keycloak(copernicus_user,copernicus_password)
+        print("Descargando ", output_file, ".")
+                
+        session.headers.update({"Authorization": f"Bearer {keycloak_token}"})
+
+        # URL de descarga
+        url = f"https://catalogue.dataspace.copernicus.eu/odata/v1/Products({file_id})/$value"
+        response = session.get(url, allow_redirects=False)
+
+        while response.status_code in (301, 302, 303, 307):
+            url = response.headers["Location"]
+            response = session.get(url, allow_redirects=False)
+
+        # Descargar con chunks
+        response = session.get(url, verify=False, stream=True)
+        total_size = int(response.headers.get('content-length', 0))
+        chunk_size = 1024 * 1024  # 1 MB
+
+        with open(output_file, "wb") as f:
+            for chunk in response.iter_content(chunk_size=chunk_size):
+                if chunk:
+                    f.write(chunk)
+        print(output_file, " descargado.")
+
+else:
+    print("No se encontraron datos para el rango de fechas y zona proporcionados.")
+
+
+# === Descomprimir todos los archivos ZIP ===
+for file in os.listdir(path):
+    if file.endswith(".zip"):
+        file_path = os.path.join(path, file)
+        with zipfile.ZipFile(file_path, 'r') as zip_ref:
+            zip_ref.extractall(path)
+        os.remove(file_path)
+```
+

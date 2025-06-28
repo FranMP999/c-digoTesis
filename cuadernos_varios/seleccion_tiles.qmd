@@ -1,0 +1,508 @@
+---
+title: Selección Tiles
+jupyter: python3
+format:
+  html:
+    code-fold: true
+---
+
+```{python}
+import pandas as pd
+import geopandas as gpd
+import matplotlib.pyplot as plt
+import contextily as cx
+import joblib
+import time
+from pathlib import Path
+
+data_path = Path("../data")
+```
+
+En el siguiente documento se seleccionan los tiles de Sentinel 2 a utilizar
+basándose en densidad y diversidad de centroides del dataset 
+`gsa_2022_centroid.gpkg`. El código está estructurado bajo el supuesto de que el
+dataset es demasiado grande para operarlo en completitud.
+Los tiles fueron obtenidos de: 
+[](https://hls.gsfc.nasa.gov/products-description/tiling-system/).
+
+## Imports preliminares
+
+Se importan puntos de prueba de la base de centroides y se utilizan como 
+**crs** de referencia:
+
+```{python}
+file_path = data_path / "gsa_2022_centroid.gpkg"
+query = f'''
+        SELECT * FROM "gsa_2022_centroid"
+         WHERE fid >= {0} AND fid < 1000
+    '''
+centroids_gdf = gpd.read_file(file_path, sql=query)
+base_crs = centroids_gdf.crs
+```
+
+Se importa el kml de tiles.
+
+**Obs:** Cada tile está compuesto por nombre, descripción y un 
+GeometryCollection con 2 polígonos y un punto,
+Creo que lo que nos interesa es el primer polígono, el punto parece ser el centro
+y el segundo polígono no tengo idea qué sea.
+
+
+```{python}
+tiles_file = data_path/ "S2A_OPER_GIP_TILPAR_MPC__20151209T095117_V20150622T000000_21000101T000000_B00.kml"
+tiles_gdf = gpd.read_file(tiles_file).to_crs(base_crs)
+
+# Se extrae el primer polígono de cada tile
+tiles_polygons = (
+    tiles_gdf
+    .assign(
+        geometry=tiles_gdf.geometry.map(lambda x: x.geoms[0])
+        )
+    [["Name", "geometry"]]
+)
+```
+
+
+## Filtrado Tiles
+
+Se filtran tiles correspondientes a Europa (sin Rusia)
+para reducir costo computacional:
+
+```{python}
+world_url = "https://naciscdn.org/naturalearth/110m/cultural/ne_110m_admin_0_countries.zip"
+world_continents = (
+    gpd.read_file(world_url)
+    .query("NAME != 'Russia'")
+    .dissolve(by="CONTINENT").reset_index()
+    .to_crs(base_crs)
+        )
+europe =  world_continents[world_continents["CONTINENT"]=="Europe"]
+europe2 = ( #sin disolver países
+           gpd.read_file(world_url)
+           .query("CONTINENT == 'Europe'")
+           .query("NAME != 'Russia'")
+           .reset_index()
+           .to_crs(base_crs)
+           )
+
+
+tilesInEurope = (
+    tiles_polygons.set_index("Name")
+    .loc[
+        gpd.tools.sjoin(
+            europe, tiles_polygons,
+            predicate="intersects", how='left'
+        ).Name
+        ]
+    )
+
+#Se extraen polígonos extraños (Son más grandes que el continente)
+tilesInEurope = (
+    tilesInEurope
+    .assign(size=lambda x: x.geometry.area)
+    .sort_values(by="size", ascending=False)
+    [2:]
+    )
+
+#Gráfico
+ax = europe.plot(figsize=(10, 10), alpha=0.5, edgecolor="k")
+for poly in tilesInEurope.geometry:
+    x, y = poly.exterior.xy
+    ax.plot(x, y )
+#cx.add_basemap(ax, crs=base_crs)
+plt.show()
+```
+
+
+## Proceso
+
+Se hereda de la clase `set` para poder sumar columnas de sets.
+```{python}
+class miSet(set):
+    def __init__(self, iterable):
+        # Llamamos a los constructores de las clases base
+        set.__init__(self, iterable)
+
+    def __add__(self, other):
+        return self.union(other)
+
+    def __radd__(self, other):
+        return self.union(other)
+
+```
+
+Se itera sobre los centroides en __chunks__. 
+
+```{python}
+'''
+# Referencia interesante: https://www.matecdev.com/posts/point-in-polygon.html
+start_fid = 0
+chunk_size = 100000
+finalTable = pd.DataFrame()
+condition = 1
+start = time.time()
+ 
+# print the difference between start 
+# and end time in milli. secs
+while condition > 0:
+    query = f'''
+            SELECT * FROM "gsa_2022_centroid"
+             WHERE fid >= {start_fid} AND fid < {start_fid + chunk_size}
+        '''
+    gdf = gpd.read_file(file_path, sql=query)
+    condition = len(gdf)
+    if condition:
+        pointInPolys = gpd.tools.sjoin(
+            gdf, tilesInEurope,
+            predicate="within", how='left'
+        )
+
+        table = (
+            pointInPolys[["Name", "hcat4_code"]]
+            .assign(density=1)
+            .groupby("Name")    
+        ).agg({
+                "density": 'sum',
+                "hcat4_code": miSet,
+                })
+        finalTable = (finalTable + table).fillna(finalTable).fillna(table)
+        start_fid += chunk_size
+
+end = time.time()
+print("The time of execution of above program is :",
+      (end-start) * 10, "ms")
+    '''
+```
+Se guarda un pkl con la tabla final.
+
+```{python}
+'''
+
+tiles_with_centroids = tiles_polygons.set_index("Name").loc[finalTable.index ]
+tile_vs_country = ( 
+    gpd.tools.sjoin(
+        europe2, tiles_with_centroids,
+        predicate="intersects", how='left'
+    )
+    .rename( columns={"NAME": "countries"})
+    [["Name", "countries"]]
+    .dropna()
+    .groupby("Name").agg(miSet)
+)
+
+centroid_summary = (
+    finalTable
+    .assign(
+        diversity=finalTable.hcat4_code.map(lambda x: len(x))
+    )
+    .join(tile_vs_country)
+    .join(tiles_polygons.set_index("Name"))
+    .sort_values(by="density", ascending=False)
+    [["density", "diversity", "countries", "hcat4_code", "geometry"]]
+)
+
+centroid_summary.to_pickle('centroid_summary.pkl')
+    '''
+```
+```{python}
+#Una vez creado el pkl es mejor leerlo que recrearlo
+
+centroid_summary = pd.read_pickle('centroid_summary.pkl')
+tiles_with_centroids = tiles_polygons.set_index("Name").loc[centroid_summary.index ]
+tile_vs_country = ( 
+    gpd.tools.sjoin(
+        europe2, tiles_with_centroids,
+        predicate="intersects", how='left'
+    )
+    .rename( columns={"NAME": "countries"})
+    [["Name", "countries"]]
+    .dropna()
+    .groupby("Name").agg(miSet)
+)
+```
+
+
+## Resultados
+
+### Gráfico tiles más densos
+```{python}
+most_dense_tiles = (
+    tiles_polygons.set_index("Name")
+    .loc[centroid_summary.index[:11]]
+    .reset_index()
+    )
+
+ax = europe2.plot("NAME", figsize=(10, 10), alpha=0.5, edgecolor="k")
+
+for i, tile in most_dense_tiles.iterrows():
+    poly = tile.geometry
+    x, y = poly.exterior.xy
+    ax.plot(x, y, label=tile.Name )
+#cx.add_basemap(ax, crs=base_crs)
+ax.set_title("10 most dense tiles")
+plt.legend()
+plt.show()
+```
+
+### Gráfico tiles más diversos
+```{python}
+most_diverse_tiles = (
+    tiles_polygons.set_index("Name")
+    .loc[
+        centroid_summary.sort_values(by="diversity", ascending=False).index[:11]
+    ]
+    .reset_index()
+    )
+
+ax = europe2.plot("NAME", figsize=(10, 10), alpha=0.5, edgecolor="k")
+
+for i, tile in most_diverse_tiles.iterrows():
+    poly = tile.geometry
+    x, y = poly.exterior.xy
+    ax.plot(x, y, label=tile.Name )
+#cx.add_basemap(ax, crs=base_crs)
+ax.set_title("10 most diverse tiles")
+ax.legend()
+plt.show()
+```
+
+
+### Análisis por países
+
+```{python}
+
+tile_vs_country2 = ( 
+    gpd.tools.sjoin(
+        europe2, tiles_with_centroids,
+        predicate="intersects", how='left'
+    )
+    .rename( columns={"NAME": "countries"})
+    [["Name", "countries"]]
+    .dropna()
+)
+most_dense_tile_by_country = (
+    centroid_summary.reset_index()
+    .drop(columns="countries")
+    .merge(
+        tile_vs_country2,
+        how="left", on="Name")
+    .sort_values(by=["countries", "density"], ascending=False)
+    .drop_duplicates(subset="countries")
+    .sort_values(by=["density"], ascending=False)
+)
+
+most_diverse_tile_by_country = (
+    centroid_summary.reset_index()
+    .drop(columns="countries")
+    .merge(
+        tile_vs_country2,
+        how="left", on="Name")
+    .sort_values(by=["countries", "diversity"], ascending=False)
+    .drop_duplicates(subset="countries")
+    .sort_values(by=["diversity"], ascending=False)
+)
+
+```
+
+```{python}
+ax = europe2.plot("NAME", figsize=(10, 10), alpha=0.5, edgecolor="k")
+
+for i, tile in most_dense_tile_by_country.iterrows():
+    poly = tile.geometry
+    x, y = poly.exterior.xy
+    ax.plot(x, y, label=f"{tile.Name}, {tile.countries}" )
+#cx.add_basemap(ax, crs=base_crs)
+ax.set_title("10 most dense tiles by country")
+ax.legend(loc="upper left")
+plt.show()
+```
+
+```{python}
+ax = europe2.plot("NAME", figsize=(10, 10), alpha=0.5, edgecolor="k")
+
+for i, tile in most_diverse_tile_by_country.iterrows():
+    poly = tile.geometry
+    x, y = poly.exterior.xy
+    ax.plot(x, y, label=f"{tile.Name}, {tile.countries}" )
+#cx.add_basemap(ax, crs=base_crs)
+ax.set_title("10 most diverse tiles by country")
+ax.legend(loc="upper left")
+plt.show()
+```
+
+### Filtro 1 país
+
+```{python}
+filtered_centroid_summary = centroid_summary[
+    centroid_summary.countries.map(lambda x: len(x)) == 1
+]
+filtered_most_dense_tile_by_country = (
+    filtered_centroid_summary.reset_index()
+    .drop(columns="countries")
+    .merge(
+        tile_vs_country2,
+        how="left", on="Name")
+    .sort_values(by=["countries", "density"], ascending=False)
+    .drop_duplicates(subset="countries")
+    .sort_values(by=["density"], ascending=False)
+)
+
+filtered_most_diverse_tile_by_country = (
+    filtered_centroid_summary.reset_index()
+    .drop(columns="countries")
+    .merge(
+        tile_vs_country2,
+        how="left", on="Name")
+    .sort_values(by=["countries", "diversity"], ascending=False)
+    .drop_duplicates(subset="countries")
+    .sort_values(by=["diversity"], ascending=False)
+)
+```
+
+```{python}
+ax = europe2.plot("NAME", figsize=(10, 10), alpha=0.5, edgecolor="k")
+
+for i, tile in filtered_most_dense_tile_by_country.iterrows():
+    poly = tile.geometry
+    x, y = poly.exterior.xy
+    ax.plot(x, y, label=f"{tile.Name}, {tile.countries}" )
+#cx.add_basemap(ax, crs=base_crs)
+ax.set_title("10 most dense tiles by country filtered")
+ax.legend(loc="upper left")
+plt.show()
+```
+
+```{python}
+ax = europe2.plot("NAME", figsize=(10, 10), alpha=0.5, edgecolor="k")
+
+for i, tile in filtered_most_diverse_tile_by_country.iterrows():
+    poly = tile.geometry
+    x, y = poly.exterior.xy
+    ax.plot(x, y, label=f"{tile.Name}, {tile.countries}" )
+#cx.add_basemap(ax, crs=base_crs)
+ax.set_title("10 most diverse tiles by country filtered")
+ax.legend(loc="upper left")
+plt.show()
+```
+
+## Elección
+
+Se eligen los siguientes buscando principalmente diversidad geográfica y 
+densidad de cultivos: 
+
+- 29TPF -> Portugal
+- 31TBF -> España
+- 32TPN -> Italia
+- 32VNH -> Denmark
+- 34VFN -> Finland
+- 29UNV -> Irlanda
+- 35TLG -> Bulgaria
+- 31UES -> Francia
+- 31UGT -> Germany
+- 33UWP -> Austria
+
+```{python}
+eleccion =  centroid_summary.loc[[
+    "29TPF",
+    "31TBF",
+    "32TPN",
+    "32VNH",
+    "34VFN",
+    "29UNV",
+    "35TLG",
+    "31UES",
+    "31UGT",
+    "33UWP",
+]]
+
+display(eleccion)
+
+ax = europe2.plot("NAME", figsize=(10, 10), alpha=0.5, edgecolor="k")
+
+for i, tile in eleccion.iterrows():
+    poly = tile.geometry
+    x, y = poly.exterior.xy
+    ax.plot(x, y, label=tile.Name )
+#cx.add_basemap(ax, crs=base_crs)
+ax.set_title("10 most diverse tiles")
+ax.legend()
+plt.show()
+```
+
+## Parcelas por país
+
+```{python}
+start_fid = 0
+chunk_size = 100000
+finalTable = pd.DataFrame()
+condition = 1
+start = time.time()
+ 
+# print the difference between start 
+# and end time in milli. secs
+while condition > 0:
+    query = f'''
+            SELECT * FROM "gsa_2022_centroid"
+             WHERE fid >= {start_fid} AND fid < {start_fid + chunk_size}
+        '''
+    gdf = gpd.read_file(file_path, sql=query)
+    condition = len(gdf)
+    if condition:
+        centroidsInCountries = gpd.tools.sjoin(
+            gdf, europe2,
+            predicate="within", how='left'
+        )
+
+        table = (
+            centroidsInCountries[["NAME", "hcat4_code"]]
+            .assign(density=1)
+            .groupby("NAME")    
+        ).agg({
+                "density": 'sum',
+                "hcat4_code": miSet,
+                })
+        finalTable = (finalTable + table).fillna(finalTable).fillna(table)
+        start_fid += chunk_size
+        print(start_fid)
+
+end = time.time()
+print("The time of execution of above program is :",
+      (end-start) * 10, "ms")
+```
+```{python}
+
+country_summary = (
+    finalTable
+    .assign(
+        diversity=finalTable.hcat4_code.map(lambda x: len(x))
+    )
+    .sort_values(by="density", ascending=False)
+    [["density", "diversity", "hcat4_code"]]
+)
+
+country_summary.to_csv('country_summary.csv')
+```
+
+
+
+
+
+
+```{python}
+(
+    tiles_polygons.set_index("Name")
+    .loc[[
+        "31TBF",
+        "29TNF",
+        "30UXU",
+        "32TPP",
+        "32UMC",
+        "29UNU",
+        "33TVN",
+        "31UFU",
+        "35TMH",
+        "32VNH",
+    ]]
+    .to_json()
+        )
+```
