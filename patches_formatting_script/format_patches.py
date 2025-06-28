@@ -1,3 +1,16 @@
+'''
+El siguiente es el script utilizado para el procesamiento de las imágenes 
+satelitales Sentinel S2 en conjunto con los polígonos de parcelas de cultivos,
+para formar tensores (band, time, x, y) con la agregación de productos Sentinel 2
+en parches de 256x256 y matrices (x,y) con las anotaciones de cultivos asociadas
+a la ubicación geográfica.
+
+Utiliza las funciones definidas en el archivo aux_functions.py
+
+Loopea a través de los tiles encontrados en `s2_path` y para cada tile
+genera todos los patches de 256x256 asociados, guardando la metadata actualzada
+cada 5 patches generados.
+'''
 import os
 from pathlib import Path
 import time
@@ -18,14 +31,14 @@ from aux_functions import (
 )
 
 sentinel_crs = 'EPSG:32629'
-in_path = Path("../data") 
+in_path = Path("../data") # dirección del directorio con los datos a procesar.
 s2_path = in_path / "productos"
 labels_path = in_path / "gsa_2022_selectedtiles.gpkg"
 
-out_path = Path("data")
-metadata_path = out_path / "metadata.geojson"
-s2_out_path = out_path / "DATA_S2"
-annotations_out_path = out_path / "ANNOTATIONS"
+out_path = Path("data") # dirección del directorio donde se almacenarán los datos procesados siguiendo el formato de https://huggingface.co/datasets/IGNF/PASTIS-HD/tree/main.
+metadata_path = out_path / "metadata.geojson" #dirección de la metadata producida en el procesamiento.
+s2_out_path = out_path / "DATA_S2" #dirección de los tensores de imágenes 4D producidos.
+annotations_out_path = out_path / "ANNOTATIONS" #dirección de las matrices 2D con los labels producidos.
 for path in [s2_out_path, annotations_out_path]:
     if not path.exists(): os.makedirs(path)
 
