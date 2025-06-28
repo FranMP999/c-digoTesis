@@ -113,6 +113,8 @@ for tile_name in unique_tiles:
         })
         count = (count + 1)%5
         if count==0 :
+            print("Tiempo de ejecución acumulado: ",
+                  round((time.time() - start), 2), "[m]")
             #Almacenar metadata
             metadata_gdf = (
                 gpd.GeoDataFrame(metadata_rows, geometry="geometry", crs=sentinel_crs)

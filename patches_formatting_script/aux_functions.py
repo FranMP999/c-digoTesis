@@ -200,6 +200,12 @@ def which_patch(id:str):
 
 def get_patch(xarray, n, patch_size=256):
     '''
+    CUIDADO CON ESTA FUNCIÓN EL COMPORTAMIENTO DE ISEL NO ES EL ESPERADO!!!!!!!
+
+    xarray.isel( x=slice(x_patch, x_patch + 256), y=slice(y_patch, y_patch + 256)) 
+    !=  xarray.isel(band=0).to_array()[slice(x_patch, x_patch + 256), (y_patch, y_patch + 256)]
+
+
     Retorna el patch n-ésimo.
     Supone que todos los productos son de igual tamaño.
     '''
