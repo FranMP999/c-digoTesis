@@ -1,0 +1,239 @@
+---
+title: EDA para presentación del curo Seminario de Tesis
+jupyter: python3                                            
+format:
+  html:
+    code-fold: true
+---
+
+Objetivos:
+Quiero información simple del gpkg de parcelas, pero más que nada
+plots de las imágenes.
+
+
+```{python}
+import ast
+from pathlib import Path
+import numpy as np
+import pandas as pd 
+import matplotlib.pyplot as plt
+
+import rasterio
+import xarray as xr
+
+import geopandas as gpd
+import contextily as cx
+
+
+from shapely.geometry import box
+import rasterio
+from rasterio.features import rasterize
+from rasterio.transform import from_bounds
+from rasterio import features
+
+from aux_functions import *
+```
+
+## Definición de Paths
+```{python}
+sentinel_crs = 'EPSG:32631'
+
+data_path = Path("../../data")
+product1_path = data_path / "productos" / "S2A_MSIL2A_20220228T112121_N0510_R037_T29TNF_20240524T055924"
+product2_path = data_path / "productos" / "S2B_MSIL2A_20220723T112119_N0510_R037_T29TNF_20240717T133603"
+patch_S2_path = data_path/ "DATA_S2" /  "S2_03672.npy" 
+patch_ANNOTATIONS_path = data_path/ "ANNOTATIONS" /  "ParcelIDs_03672.npy" 
+
+labels_path = data_path / "gsa_2022_selectedtiles.gpkg"
+metadata_path = data_path/ "metadata.geojson"
+
+tile_name = "29TNF"
+patch_n = 1823
+id = get_id(tile_name, patch_n)
+```
+
+## Importación de productos S2
+
+
+```{python}
+products = []
+for product_path in [product1_path, product2_path]:
+    all_bands = []
+    for band_path in get_rgb_band_paths(product_path):
+        print("procesando banda:", band_path)
+        all_bands.append( 
+            xr.open_dataset(band_path, engine="rasterio", band_as_variable=True)
+                .assign(band=path2band(band_path)).set_coords("band")
+                .assign(time=path2date(band_path)).set_coords("time")
+                .coarsen(x=10).mean().coarsen(y=10).mean()
+                )
+    products.append(xr.concat(all_bands, dim="band"))
+complete_tensor = (
+        xr.concat(products, dim="time")
+        )
+all_bands = 0
+products = 0
+
+sentinel_crs = 'EPSG:32631'
+```
+```{python}
+
+```
+
+```{python}
+
+products = []
+for product_path in [product1_path, product2_path]:
+    products.append(
+        xr.concat([
+        get_patch(
+            xr.open_dataset(band_path, engine="rasterio", band_as_variable=True)
+                #.drop_dims("band")
+                .assign(band=path2band(band_path)).set_coords("band")
+                .assign(time=path2date(band_path)).set_coords("time"),
+            n = patch_n
+            )
+        for band_path in get_band_paths(product_path)
+        ], dim="band")
+    )
+patch_tensor = xr.concat(products, dim="time")
+```
+
+
+## Importación de Metada Procesada
+
+```{python}
+metadata = (
+    gpd.read_file(metadata_path)
+    .astype({
+        "id": int,
+        "patch_n": int,
+    })
+    .set_index("id")
+        )
+display(metadata)
+selected_patch_metadata = metadata.sort_values(by="parcel_cover", ascending=False).iloc[0]
+id_selected_patch = get_id(*selected_patch_metadata[["tile_name", "patch_n"]])
+print("patch con mayor densidad de parcelas: ") 
+display(selected_patch_metadata)
+```
+
+## Importación de GPKG
+```{python}
+def get_labels_in_tile(labels_path: Path, tile_name: str, crs) -> gpd.GeoDataFrame:
+    '''
+    Retorna un geopandas dataframe con las parcelas en el tile
+    a partir de un path, el nombre del tile, el mapeo hcat4-clases y un crs.
+    '''
+    return (
+        gpd.read_file(
+            labels_path,
+            where=f"name='{tile_name}'",
+        )
+        .to_crs(crs)
+        .assign(polygon=lambda df: df.geometry.map(lambda x: x.geoms[0]))
+    )
+
+centroids_gdf = get_labels_in_tile(
+    labels_path = labels_path,
+    tile_name= '29TNF',
+    crs=patch_tensor.rio.crs
+)
+
+#ax = centroids_gdf.plot()
+#cx.add_basemap(ax, crs=base_crs)
+#plt.show()
+
+```
+
+## Gráficos
+
+### Gráficos Tensor Completo
+```{python}
+
+def get_xarray_coor(coor, i):
+    return complete_tensor.coords[coor][i].to_numpy()
+i = 1823
+x1 = get_xarray_coor("x", i)
+x2 = get_xarray_coor("x", i+256)
+y1 = get_xarray_coor("y", i)
+y2 = get_xarray_coor("y", i+256)
+poligono_patch = ([x1,x2,x2,x1, x1], [y1, y1, y2, y2, y1])
+
+#print(*selected_patch_metadata.geometry.exterior.xy)
+plt.plot(*poligono_patch)
+plt.show()
+```
+```{python}
+complete_tensor.band_1.isel(time=1).plot.imshow(robust=True)
+plt.plot(*box(*patch_tensor.rio.bounds()).exterior.xy, c="r", label="patch escogido")
+
+#plt.plot(*poligono_patch)
+#plt.savefig("TileCompleta.png")
+plt.title("Imagen RGB Tile 29TNF")
+plt.legend()
+plt.show()
+```
+
+### Gráficos Tensor Patch
+
+```{python}
+#complete_tensor.band_1.isel(time=1).plot.imshow(robust=True)
+rgb_bands = ["B02", "B03", "B04"]
+patch_tensor.band_1.sel(band=rgb_bands).plot.imshow(col="time", robust=True)
+
+#plt.plot(*poligono_patch)
+#plt.title("Imagen RGB Patch 1823")
+plt.savefig("Patch.png")
+plt.show()
+```
+```{python}
+# colormap = plt.cm.viridis
+#set_dark_theme()
+colors = [
+    "#FF5733",
+    "#33FF57",
+    "#3357FF",
+    "#F1C40F",
+    "#8E44AD",
+    "#E67E22",
+    "#2ECC71",
+    "#1ABC9C",
+    "#3498DB",
+    "#E74C3C",
+    "#9B59B6",
+    "#34495E",
+    "#16A085",
+    "#D35400",
+    "#7F8C8D",
+    "#BDC3C7",
+        ]
+crop_map
+crop_map[int(sel_parcels.hcat4_code.unique()[0])]
+```
+```{python}
+rgb_bands = ["B02", "B03", "B04"]
+patch_polygon = box(*patch_tensor.rio.bounds())
+sel_parcels = centroids_gdf[centroids_gdf.intersects(patch_polygon)]
+color_map = {int(code): color for code, color in zip(sel_parcels.hcat4_code.unique(), colors)}
+
+fig, ax = plt.subplots()
+
+(
+    patch_tensor.band_1.sel(band=rgb_bands).isel(time=1).plot.imshow(robust=True, ax=ax)
+        )
+for i, parcel in sel_parcels.iterrows():
+    ax.fill(*parcel.polygon.exterior.xy, alpha=0.5, fc='r', ec='none',
+            label=parcel.hcat4_code, color = color_map[int(parcel.hcat4_code)])
+ax.set_title("Parcelas en Patch")
+
+#3 líneas para que no se repitan labels
+handles, labels = ax.get_legend_handles_labels()
+unique_legend = dict(zip(labels, handles))
+ax.legend(unique_legend.values(), unique_legend.keys())
+
+plt.savefig("PatchWCrops.png")
+plt.show()
+```
+
+
