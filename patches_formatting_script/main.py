@@ -30,7 +30,6 @@ from aux_functions import (
 )
 
 load_dotenv()
-sentinel_crs = 'EPSG:32629'
 in_path = Path(os.getenv("INPUT_DATA_PATH")) # dirección del directorio con los datos a procesar.
 s2_path = in_path / "productos"
 labels_path = in_path / "gsa_2022_selectedtiles.gpkg"
@@ -63,6 +62,7 @@ metadata_rows = []
 count=0
 for tile_name in unique_tiles:
     print(f"Formateando tile {tile_name}...")
+    sentinel_crs = get_crs(s2_path.glob(f"*{tile_name}*"))
 
     #Parcelas en tile
     labels_gdf = get_labels_in_tile(

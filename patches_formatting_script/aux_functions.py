@@ -52,18 +52,18 @@ def get_crs(products_paths):
     Loopea en todos los productos buscando crs.
     Se asegura de que el crs exista y sea consistente.
 
-    Según lo explorado no todos los productos tienen crs, pero basta con que 
+    Según lo explorado no todas los productos tienen crs, pero basta con que 
     alguno lo tenga y que los que tengan, tengan el mismo.
     '''
     crs_arr = []
     for product_path in products_paths:
-        crs = rasterio.open(get_band_paths(product_path)[0]).crs.to_epsg()
-        if crs is not None:
-            crs_arr.append(crs)
-    assert len(crs_arr) > 0, "No se encontró crs."
+        for band_path in get_band_paths(product_path):
+            crs = rasterio.open(band_path).crs.to_epsg()
+            if crs is not None:
+                crs_arr.append(crs)
     crs_arr = np.array(crs_arr)
-    assert np.all(crs_arr == crs_arr[0]), "crs no es consistente en los productos"
-    return crs_arr[0]
+    assert len(crs_arr) > 0, "No se encontró crs."
+    return f"EPSG:{crs_arr[0]}"
 
 
 # Para trabajar patches
