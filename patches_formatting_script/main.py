@@ -24,6 +24,7 @@ import geopandas as gpd
 
 from aux_functions import (
     get_id,
+    get_crs,
     get_labels_in_tile,
     get_annotation_raster,
     create_patch_tensor_rasterio,
