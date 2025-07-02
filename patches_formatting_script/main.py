@@ -12,6 +12,7 @@ genera todos los patches de 256x256 asociados, guardando la metadata actualzada
 cada 5 patches generados.
 '''
 import os
+from dotenv import load_dotenv
 from pathlib import Path
 import time
 import numpy as np
@@ -28,12 +29,14 @@ from aux_functions import (
     create_patch_tensor_rasterio,
 )
 
+load_dotenv()
 sentinel_crs = 'EPSG:32629'
-in_path = Path("../data") # dirección del directorio con los datos a procesar.
+in_path = Path(os.getenv("INPUT_DATA_PATH")) # dirección del directorio con los datos a procesar.
 s2_path = in_path / "productos"
 labels_path = in_path / "gsa_2022_selectedtiles.gpkg"
+assert labels_path.exists(), "No existe archivo con labels"
 
-out_path = Path("data") # dirección del directorio donde se almacenarán los datos procesados siguiendo el formato de https://huggingface.co/datasets/IGNF/PASTIS-HD/tree/main.
+out_path = Path(os.getenv("OUTPUT_DATA_PATH")) # dirección del directorio donde se almacenarán los datos procesados siguiendo el formato de https://huggingface.co/datasets/IGNF/PASTIS-HD/tree/main.
 metadata_path = out_path / "metadata.geojson" #dirección de la metadata producida en el procesamiento.
 s2_out_path = out_path / "DATA_S2" #dirección de los tensores de imágenes 4D producidos.
 annotations_out_path = out_path / "ANNOTATIONS" #dirección de las matrices 2D con los labels producidos.
