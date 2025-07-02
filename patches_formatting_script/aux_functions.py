@@ -30,9 +30,9 @@ def get_band_paths(product_path: Path):
     '''
     Obtiene una lista con los paths de las bandas a partir del path de producto.
     '''
-    return list(product_path.glob(
+    return np.sort(list(product_path.glob(
         f"*_*_B*"
-        ))
+        )))
 
 # Para acceder archivos de productos
 def path2band(path: Path):
@@ -82,7 +82,6 @@ def get_labels_in_tile(labels_path: Path, tile_name: str, class_mapping: dict, c
     )
 
 
-
 def get_patch_rasterio(
         raster_reader:rasterio.io.DatasetReader,
         n: int, patch_size=256, get_data=False
@@ -94,8 +93,8 @@ def get_patch_rasterio(
 
     x_patch, y_patch = patch_coors(n, patch_size, array_size)
     window = rasterio.windows.Window.from_slices(
-            rows=slice(x_patch, x_patch + 256),
-            cols=slice(y_patch, y_patch + 256),
+            cols=slice(x_patch, x_patch + 256),
+            rows=slice(y_patch, y_patch + 256),
         )
     if get_data:
         return raster_reader.read( 1, window=window), RasterData(raster_reader, window)
@@ -132,6 +131,7 @@ def create_patch_tensor_rasterio(products_paths: Path, patch_n: int) -> np.ndarr
     tensor_final = np.stack(frames, axis=0)
     patch_data.set_dates(dates)
     return tensor_final, patch_data  # (temporal, bands, N, N)
+
 
 def get_annotation_raster(patch_data: RasterData, labels_gdf: gpd.GeoDataFrame) -> np.ndarray:
         tensor_bounds = patch_data.bounds
@@ -198,7 +198,7 @@ def which_patch(id:str):
 
 ### LEGACY CODE ###
 
-def get_patch(xarray, n, patch_size=256):
+def get_patch_xarray(xarray, n, patch_size=256):
     '''
     CUIDADO CON ESTA FUNCIÓN EL COMPORTAMIENTO DE ISEL NO ES EL ESPERADO!!!!!!!
 
@@ -219,7 +219,8 @@ def get_patch(xarray, n, patch_size=256):
             x=slice(x_patch, x_patch + 256),
             y=slice(y_patch, y_patch + 256),
         )
-def create_patch_tensor(products_paths, patch_n):
+
+def create_patch_tensor_xarray(products_paths, patch_n):
         multiband_tensors = []
         for product_path in products_paths:
             multiband_tensors.append(
