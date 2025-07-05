@@ -32,7 +32,7 @@ from aux_functions import (
 
 load_dotenv()
 in_path = Path(os.getenv("INPUT_DATA_PATH")) # dirección del directorio con los datos a procesar.
-s2_path = in_path / "productos"
+s2_path = in_path / "products"
 labels_path = in_path / "gsa_2022_selectedtiles.gpkg"
 assert labels_path.exists(), "No existe archivo con labels"
 
