@@ -111,12 +111,16 @@ for tile_name in unique_tiles:
                 i: pd.to_datetime(date).strftime("%Y%m%d")
                 for i, date in enumerate(raster_data.dates)
             },
+            "process_num_S2": {
+                i: processn
+                for i, processn in enumerate(raster_data.process_nums)
+            },
             "geometry": raster_data.bounds,
         })
         count = (count + 1)%5
         if count==0 :
             print("Tiempo de ejecución acumulado: ",
-                  round((time.time() - start), 2), "[m]")
+                  round((time.time() - start)/60, 2), "[m]")
             #Almacenar metadata
             metadata_gdf = (
                 gpd.GeoDataFrame(metadata_rows, geometry="geometry", crs=sentinel_crs)

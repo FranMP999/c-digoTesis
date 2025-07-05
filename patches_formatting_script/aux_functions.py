@@ -21,10 +21,33 @@ class RasterData:
         self.bounds = box(*raster_reader.window_bounds(window))
         self.transform = raster_reader.window_transform(window)
         self.shape = (256, 256)
+        self.bands= [
+            "B01", "B02", "B03", "B04", "B05",
+            "B06", "B07", "B08", "B09", "B11", "B12", "B8A",
+            ]
         
     def set_dates(self, dates):
         self.dates = dates
         return self
+
+    def set_process_nums(self, process_nums):
+        self.process_nums = process_nums
+        return self
+
+    def __repr__(self):
+        return (
+            f"Object attributes: bounds, transform, shape, bands, dates, process_nums.\n"
+            f"Tensor_shape: ({len(self.dates)}, 12, 256, 256)\n"
+            f"Dates: \n\t"
+            + "\n\t".join([str(date) for date in self.dates])
+                    )
+    def __str__(self):
+        return (
+            f"Object attributes: bounds, transform, shape, bands, dates, process_nums.\n"
+            f"Tensor_shape: ({len(self.dates)}, 12, 256, 256)\n"
+            f"Dates: \n\t"
+            + "\n\t".join([str(date) for date in self.dates])
+                    )
 
 def get_band_paths(product_path: Path):
     '''
@@ -41,11 +64,18 @@ def path2band(path: Path):
     '''
     return str(path).split("/")[-1].split("_")[-2]
 
-def path2date(path: Path):
+def path2date(path):
     '''
-    Entrega el datetime asociado a un producto Sentinel-2 a partir de su path.
+    Entrega el datetime asociado a un producto Sentinel-2 a partir del path a su directorio.
     '''
-    return pd.to_datetime(str(path).split("/")[-1].split("_")[1][:8])
+    return pd.to_datetime(str(path).split("/")[-1].split("_")[2][:8])
+
+def path2processn(path: Path):
+    '''
+    Entrega el número de baseline processing number asociado a un producto 
+    Sentinel-2 a partir del path a su directorio.
+    '''
+    return str(path).split("/")[-1].split("_")[3]
 
 def get_crs(products_paths):
     '''
@@ -100,6 +130,37 @@ def get_labels_in_tile(labels_path: Path, tile_name: str, class_mapping: dict, c
     )
 
 
+def black_patches_filter(
+        patch_tensor:np.ndarray,
+        raster_data,
+        threshold=0.2
+) -> np.ndarray | RasterData:
+    '''
+    Función que dado un tensor ya armado y su objeto rater_data,
+    excluye las fechas en las que el porcentaje de valores nulos en el
+    total de bandas es menor a threshold.
+    '''
+    dates = raster_data.dates
+    process_nums = raster_data.process_nums
+
+    filter_df = (
+        pd.DataFrame(
+            data=[
+                ( i, date, processn, (patch_tensor[i,:,:,:]==0).sum()/ patch_tensor[i,:,:,:].size)
+                for i, (date, processn) in enumerate(zip(dates, process_nums))
+                ],
+            columns=["i", "date", "processn", "null_percent"],
+        )
+        .query(f"null_percent<{threshold}")
+        )
+
+    filtered_patch = patch_tensor[filter_df.i, :, :,:]
+    filtered_dates = filter_df.date
+    filtered_process_nums = filter_df.processn
+    raster_data.set_dates(filtered_dates)
+    raster_data.set_process_nums(filtered_process_nums)
+    return filtered_patch, raster_data
+
 def get_patch_rasterio(
         raster_reader:rasterio.io.DatasetReader,
         n: int, patch_size=256, get_data=False
@@ -126,9 +187,12 @@ def create_patch_tensor_rasterio(products_paths: Path, patch_n: int) -> np.ndarr
     '''
     frames = []
     #Se ordenan los path de productos por fecha
-    dates, sorted_paths = (lambda series: (series.index, series.values))(
-            pd.Series({ path2date(get_band_paths(path)[0]): path for path in products_paths })
-            .sort_index()
+    dates, processnums, sorted_paths = (lambda df: (df.date, df.processn, df.path))(
+            pd.DataFrame(
+                [(path2date(path), path2processn(path),  path)  for path in products_paths],
+                columns = ["date", "processn", "path"] 
+                )
+            .sort_values(by="date")
             )
 
     for product_path in sorted_paths:
@@ -148,6 +212,12 @@ def create_patch_tensor_rasterio(products_paths: Path, patch_n: int) -> np.ndarr
         else: print(f"PRODUCTO NO TIENE LAS 12 BANDAS: {product_path} ")
     tensor_final = np.stack(frames, axis=0)
     patch_data.set_dates(dates)
+    patch_data.set_process_nums(processnums)
+
+    tensor_final, patch_data = black_patches_filter(
+        patch_tensor = tensor_final,
+        raster_data = patch_data,
+    )
     return tensor_final, patch_data  # (temporal, bands, N, N)
 
 

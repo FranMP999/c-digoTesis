@@ -6,6 +6,9 @@ format:
     code-fold: true
 ---
 
+ESTE ES UN ARCHIVO DE EXPERIMENTACIÓN, POSIBLEMENTE HAYAN PROBLEMAS DE VERSIONAMIENTO
+EN LAS FUNCIONES Y DEFINICIONES A LO LARGO DEL DOCUMENTO.
+
 Objetivos:
 Quiero patches de 256x256, que son tensores de 4 dimensiones, 2 de imagen, 1 de banda/etiqueta y una de tiempo.
 La idea es para cada patch crear las etiquetas cruzando los polígonos en el archivo gpkg enviado por Martin y quedarnos con 
@@ -41,20 +44,25 @@ from rasterio import features
 # Para acceder archivos de productos
 def path2band(path):
     '''
-    Obtiene el código de banda de un producto Sentinel-2 a partir de su path.
+    Obtiene el código de banda de un producto Sentinel-2 a partir del path de la imagen.
     '''
     return str(path).split("/")[-1].split("_")[-2]
 
 def path2date(path):
     '''
-    Entrega el datetime asociado a un producto Sentinel-2 a partir de su path.
+    Entrega el datetime asociado a un producto Sentinel-2 a partir del path a su directorio.
     '''
-    return pd.to_datetime(str(path).split("/")[-1].split("_")[1][:8])
+    return pd.to_datetime(str(path).split("/")[-1].split("_")[2][:8])
 
 def get_band_paths(product_path):
-    return list(product_path.glob(
+    return np.sort(list(product_path.glob(
         f"*_*_B*"
-        ))
+        )))
+
+def get_rgb_band_paths(product_path):
+    return np.sort(list(product_path.glob(
+        f"*_*_B0[234]*"
+        )))
 
 # Para trabajar patches
 def patch_coors(n, patch_size=256, array_size=1830):
@@ -214,6 +222,7 @@ centroids_gdf["polygon"] = centroids_gdf.geometry.map(lambda x: x.geoms[0])
 
 ```
 
+
 ## Importación banda de prueba
 Voy a experimentar con una sóla banda para reducir carga en la ram y poder 
 hacer gráficos.
@@ -232,6 +241,7 @@ example_raster.rio.crs.to_wkt("crs.wkt")
 (example_raster.x.size//256 + 1)**2
 
 ```
+
 
 ## Gráfico
 ```{python}
@@ -340,6 +350,7 @@ help(plt.imshow)
 
 ```
 
+
 ## Prueba con tensor
 
 ```{python}
@@ -387,6 +398,7 @@ number = (11000//256+1)**2
 "{:04}".format(number)
 print(s2_path)
 ```
+
 
 ## Prueba de archivo S2
 ```{python}
@@ -538,6 +550,7 @@ time_series_tensor.band_1.sel(band=rgb_bands).isel(time=1).plot.imshow(robust=Tr
 plt.show()
 ```
 
+
 ## Importación alternativa productos S2 (rasterio)
 
 ```{python}
@@ -571,7 +584,7 @@ def create_patch_tensor2(products_paths, patch_n):
 
 ```{python}
 sentinel_crs = 'EPSG:32631'
-s2_path = Path("../data/productos")
+s2_path = Path("../../data/productos")
 product1_path = s2_path / "S2A_MSIL2A_20211001T112121_N0500_R037_T29TNF_20230108T191004"
 product2_path = s2_path / "S2A_MSIL2A_20211004T113321_N0500_R080_T29TNF_20230111T081711"
 
@@ -592,4 +605,216 @@ stack
 raster_xarray.band_data.isel(x=-1,y=-1)
 plt.imshow(raster_rasterio.read(1))
 plt.show()
+```
+
+
+## Nuevas funciones auxiliares: Filtro de parches negros y get_processing_number:
+
+```{python}
+class RasterData:
+    '''
+    Clase para pasar la data geográfica (y metadata) del patch de una función a otra.
+    Esta en conjunto con el np.ndarray del patch constituyen toda la información
+    extraída en su creación.
+    '''
+    def __init__(
+            self, 
+            raster_reader: rasterio.io.DatasetReader,
+            window: rasterio.windows.Window
+    ):
+        self.bounds = box(*raster_reader.window_bounds(window))
+        self.transform = raster_reader.window_transform(window)
+        self.shape = (256, 256)
+        self.bands= [
+            "B01", "B02", "B03", "B04", "B05",
+            "B06", "B07", "B08", "B09", "B11", "B12", "B8A",
+            ]
+        
+    def set_dates(self, dates):
+        self.dates = dates
+        return self
+
+    def set_process_nums(self, process_nums):
+        self.process_nums = process_nums
+        return self
+
+    def __repr__(self):
+        return (
+            f"Object attributes: bounds, transform, shape, bands, dates, process_nums.\n"
+            f"Tensor_shape: ({len(self.dates)}, 12, 256, 256)\n"
+            f"Dates: \n\t"
+            + "\n\t".join([str(date) for date in self.dates])
+                    )
+    def __str__(self):
+        return (
+            f"Object attributes: bounds, transform, shape, bands, dates, process_nums.\n"
+            f"Tensor_shape: ({len(self.dates)}, 12, 256, 256)\n"
+            f"Dates: \n\t"
+            + "\n\t".join([str(date) for date in self.dates])
+                    )
+
+def path2date(path):
+    '''
+    Entrega el datetime asociado a un producto Sentinel-2 a partir del path a su directorio.
+    '''
+    return pd.to_datetime(str(path).split("/")[-1].split("_")[2][:8])
+def path2processn(path: Path):
+    '''
+    Entrega el número de baseline processing number asociado a un producto 
+    Sentinel-2 a partir del path a su directorio.
+    '''
+    return str(path).split("/")[-1].split("_")[3]
+
+```
+
+```{python}
+
+def black_patches_filter(
+        patch_tensor:np.ndarray,
+        raster_data,
+        threshold=0.2
+) -> np.ndarray | RasterData:
+    '''
+    Función que dado un tensor ya armado y su objeto rater_data,
+    excluye las fechas en las que el porcentaje de valores nulos en el
+    total de bandas es menor a threshold.
+    '''
+    dates = raster_data.dates
+    process_nums = raster_data.process_nums
+
+    filter_df = (
+        pd.DataFrame(
+            data=[
+                ( i, date, processn, (patch_tensor[i,:,:,:]==0).sum()/ patch_tensor[i,:,:,:].size)
+                for i, (date, processn) in enumerate(zip(dates, process_nums))
+                ],
+            columns=["i", "date", "processn", "null_percent"],
+        )
+        .query(f"null_percent<{threshold}")
+        )
+
+    filtered_patch = patch_tensor[filter_df.i, :, :,:]
+    filtered_dates = filter_df.date
+    filtered_process_nums = filter_df.processn
+    raster_data.set_dates(filtered_dates)
+    raster_data.set_process_nums(filtered_process_nums)
+    return filtered_patch, raster_data
+                                            
+
+```
+
+### create_patch_tensor_rasterio con funciones nuevas
+
+```{python}
+def get_patch_rasterio(
+        raster_reader:rasterio.io.DatasetReader,
+        n: int, patch_size=256, get_data=False
+)-> np.ndarray | RasterData :
+    '''
+    Retorna el patch n-ésimo a partir de un Dataset Reader de rasterio
+    '''
+    array_size = raster_reader.shape[0]
+
+    x_patch, y_patch = patch_coors(n, patch_size, array_size)
+    window = rasterio.windows.Window.from_slices(
+            cols=slice(x_patch, x_patch + 256),
+            rows=slice(y_patch, y_patch + 256),
+        )
+    if get_data:
+        return raster_reader.read( 1, window=window), RasterData(raster_reader, window)
+    else:
+        return raster_reader.read( 1, window=window)
+
+def create_patch_tensor_rasterio(products_paths: Path, patch_n: int) -> np.ndarray | RasterData :
+    '''
+    Retorna tupla (tensor, RasterData) con tensor del parche completo.
+    Recibe un iterable con los paths de todos los productos del tile y el número de patch deseado.
+    '''
+    frames = []
+    #Se ordenan los path de productos por fecha
+    dates, processnums, sorted_paths = (lambda df: (df.date, df.processn, df.path))(
+            pd.DataFrame(
+                [(path2date(path),path2processn(path),  path)  for path in products_paths],
+                columns = ["date", "processn", "path"] 
+                )
+            .sort_values(by="date")
+            )
+
+    for product_path in sorted_paths:
+        band_arrays = []
+        i=0
+        for band_path in get_band_paths(product_path):
+            with rasterio.open(band_path) as src:
+                if i==0:
+                    band_raster, patch_data = get_patch_rasterio(src, patch_n, get_data=True)
+                    i+=1
+                else:
+                    band_raster = get_patch_rasterio(src, patch_n)
+            band_arrays.append(band_raster)
+        if len(band_arrays) == 12:
+            stack = np.stack(band_arrays, axis=0)  # (bands, N, N)
+            frames.append(stack)
+        else: print(f"PRODUCTO NO TIENE LAS 12 BANDAS: {product_path} ")
+    tensor_final = np.stack(frames, axis=0)
+    patch_data.set_dates(dates)
+    patch_data.set_process_nums(processnums)
+
+    tensor_final, patch_data = black_patches_filter(
+        patch_tensor = tensor_final,
+        raster_data = patch_data,
+    )
+    return tensor_final, patch_data  # (temporal, bands, N, N)
+```
+
+### Gráficos
+
+```{python}
+sentinel_crs = 'EPSG:32631'
+s2_path = Path("../../data/productos/")
+products_paths = list(s2_path.glob("*"))
+patch_n = 1000
+
+filtered_patch, filtered_patch_data = create_patch_tensor_rasterio(products_paths, patch_n)
+```
+
+```{python}
+
+transformer = rasterio.transform.AffineTransformer(filtered_patch_data.transform)
+xcoords, ycoords = transformer.xy(cols=range(256), rows=range(256))
+
+```
+```{python}
+def xarray_from_numpy(np_raster, raster_data):
+    transformer = rasterio.transform.AffineTransformer(raster_data.transform)
+    xcoords, ycoords = transformer.xy(cols=range(256), rows=range(256))
+
+    xarray = xr.DataArray(
+        data=np_raster,
+        dims=["time", "band", "y", "x"],
+        coords={
+            "time": raster_data.dates,
+            "band": raster_data.bands,
+            "x": xcoords,
+            "y": ycoords,
+        },
+    )
+    return xarray
+```
+
+```{python}
+rgb_bands = ["B02", "B03", "B04"]
+(
+    xarray_from_numpy(filtered_patch, filtered_patch_data)
+    .isel(time=[0,1,2,4,5])
+    .sel(band=rgb_bands)
+    .plot.imshow(col="time", robust=True)
+        )
+plt.show()
+```
+
+```{python}
+v = range(10)
+u = range(2, 12)
+for i, (a,b) in enumerate(zip(v,u)):
+    print(i,a,b)
 ```
