@@ -284,6 +284,27 @@ def which_patch(id:str):
     print(f"El id {id} está asocidado al patch {patch_n} del tile {tile_name}.")
     return tile_name, patch_n
 
+def xarray_from_numpy(np_raster: np.ndarray, raster_data: RasterData) -> xr.DataArray:
+    '''
+    Función con fines principalmente de visualización.
+    '''
+    xcoords, ycoords = (
+            rasterio.transform.AffineTransformer(raster_data.transform)
+            .xy(cols=range(256), rows=range(256))
+           )
+
+    xarray = xr.DataArray(
+        data=np_raster,
+        dims=["time", "band", "y", "x"],
+        coords={
+            "time": raster_data.dates,
+            "band": raster_data.bands,
+            "x": xcoords,
+            "y": ycoords,
+        },
+    )
+    return xarray
+
 ### LEGACY CODE ###
 
 def get_patch_xarray(xarray, n, patch_size=256):
