@@ -235,6 +235,27 @@ def get_annotation_raster(patch_data: RasterData, labels_gdf: gpd.GeoDataFrame) 
             dtype = None
         )
 
+def update_metadata_file(new_rows, path, crs):
+    '''
+    Actualiza el archivo de metadata existente, si no existe crea uno.
+    '''
+    metadata_gdf = (
+        gpd.GeoDataFrame(new_rows, geometry="geometry", crs=crs)
+        .set_index("id")
+    )
+    if path.exists():
+        old_metadata_gdf = (
+            gpd.read_file(path).set_crs(crs, allow_override=True)
+            .astype({"id": int})
+            .set_index("id")
+        )
+        metadata_gdf = pd.concat([
+            metadata_gdf,
+            old_metadata_gdf,
+            ]).reset_index().drop_duplicates(subset="id").set_index("id")
+    with open(path, "w") as text_file:
+        text_file.write(metadata_gdf.to_json())
+
 
 def get_id(tile_name: str, patch_n: int):
     array_size = 10980

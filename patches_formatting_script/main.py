@@ -43,6 +43,7 @@ annotations_out_path = out_path / "ANNOTATIONS" #dirección de las matrices 2D c
 for path in [s2_out_path, annotations_out_path]:
     if not path.exists(): os.makedirs(path)
 
+# definición mapeo hcat4_code -> crop label class
 class_mapping_path = Path("class_mapping.csv")
 class_mapping = (
     pd.read_csv(class_mapping_path, index_col=0)
@@ -101,7 +102,7 @@ for tile_name in unique_tiles:
             annotation_raster.astype(np.int16)
         )
 
-        # Guardar metadata cada 5 patches
+        # Guardar metadata cada 5 patches (por si hay detención forzosa)
         metadata_rows.append({
             "id": id,
             "tile_name": tile_name,
@@ -118,26 +119,20 @@ for tile_name in unique_tiles:
             "geometry": raster_data.bounds,
         })
         count = (count + 1)%5
-        if count==0 :
+        if count == 0 :
             print("Tiempo de ejecución acumulado: ",
                   round((time.time() - start)/60, 2), "[m]")
             #Almacenar metadata
-            metadata_gdf = (
-                gpd.GeoDataFrame(metadata_rows, geometry="geometry", crs=sentinel_crs)
-                .set_index("id")
-            )
-            if metadata_path.exists():
-                old_metadata_gdf = (
-                    gpd.read_file(metadata_path).set_crs(sentinel_crs, allow_override=True)
-                    .astype({"id": int})
-                    .set_index("id")
-                )
-                metadata_gdf = pd.concat([
-                    metadata_gdf,
-                    old_metadata_gdf,
-                    ]).reset_index().drop_duplicates(subset="id").set_index("id")
-            with open(metadata_path, "w") as text_file:
-                text_file.write(metadata_gdf.to_json())
+            update_metadata_file(
+                new_rows=metadata_rows,
+                path=metadata_path,
+                crs=sentinel_crs)
+
+    #Almacenar metadata faltante al terminar el tile
+    update_metadata_file(
+        new_rows=metadata_rows,
+        path=metadata_path,
+        crs=sentinel_crs)
 
 end = time.time()
 print("The time of execution of above program is :",
