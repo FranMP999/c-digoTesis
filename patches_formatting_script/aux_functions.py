@@ -93,6 +93,7 @@ def get_crs(products_paths):
                 crs_arr.append(crs)
     crs_arr = np.array(crs_arr)
     assert len(crs_arr) > 0, "No se encontró crs."
+    assert (crs_arr == crs_arr[0]).all(), "crs no es consistente."
     return f"EPSG:{crs_arr[0]}"
 
 
