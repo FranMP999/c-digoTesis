@@ -28,6 +28,7 @@ from aux_functions import (
     get_labels_in_tile,
     get_annotation_raster,
     create_patch_tensor_rasterio,
+    udate_metadata_file,
 )
 
 load_dotenv()
